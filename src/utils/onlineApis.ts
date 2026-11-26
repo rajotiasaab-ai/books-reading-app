@@ -53,8 +53,12 @@ async function fetchViaProxy(
   }
 }
 
-async function fetchJsonViaProxy<T>(targetUrl: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetchViaProxy(targetUrl, signal)
+async function fetchJsonViaProxy<T>(
+  targetUrl: string,
+  signal?: AbortSignal,
+  timeoutMs = 15000
+): Promise<T> {
+  const res = await fetchViaProxy(targetUrl, signal, timeoutMs)
   if (!res.ok) {
     throw new Error(`API returned ${res.status}`)
   }
@@ -312,13 +316,15 @@ async function searchOpenLibrary(
     q,
     has_fulltext: 'true',
     ebook_access: 'public',
-    limit: '24',
+    fields: 'key,title,author_name,cover_i,first_publish_year,id_project_gutenberg,ia',
+    limit: '16',
     page: String(page),
   })
 
   const data = await fetchJsonViaProxy<OpenLibraryResponse>(
     `https://openlibrary.org/search.json?${params.toString()}`,
-    signal
+    signal,
+    22000
   )
 
   const docs = (data.docs || []).filter(
@@ -337,7 +343,7 @@ async function searchOpenLibrary(
       payload: d as unknown as Record<string, unknown>,
     })),
     totalCount: data.numFound || docs.length,
-    hasNext: page * 24 < (data.numFound || 0),
+    hasNext: page * 16 < (data.numFound || 0),
     hasPrev: page > 1,
   }
 }

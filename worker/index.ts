@@ -49,7 +49,7 @@ export default {
       try {
         const upstream = await fetch(targetUrl.toString(), {
           redirect: 'follow',
-          signal: AbortSignal.timeout(15000),
+          signal: AbortSignal.timeout(25000),
           headers: {
             'User-Agent': 'BookShelf-Reader/1.0 (https://github.com/rajotiasaab-ai/books-reading-app)',
           },
