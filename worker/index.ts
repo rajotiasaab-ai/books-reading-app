@@ -7,6 +7,8 @@ interface Env {
 const EXACT_ALLOWED_HOSTS = new Set([
   'www.gutenberg.org',
   'gutenberg.org',
+  'gutenberg.pglaf.org',
+  'aleph.pglaf.org',
   'gutendex.com',
   'www.gutendex.com',
   'openlibrary.org',
@@ -22,6 +24,7 @@ function isAllowedHost(hostname: string): boolean {
   if (EXACT_ALLOWED_HOSTS.has(hostname)) return true
   if (hostname.endsWith('.archive.org')) return true
   if (hostname.endsWith('.gutenberg.org')) return true
+  if (hostname.endsWith('.pglaf.org')) return true
   return false
 }
 
@@ -51,7 +54,8 @@ export default {
           redirect: 'follow',
           signal: AbortSignal.timeout(25000),
           headers: {
-            'User-Agent': 'BookShelf-Reader/1.0 (https://github.com/rajotiasaab-ai/books-reading-app)',
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) BookShelfReader/1.0',
           },
         })
 

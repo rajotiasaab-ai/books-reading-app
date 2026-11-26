@@ -1,9 +1,17 @@
+import dns from 'node:dns'
+import net from 'node:net'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+
+// Fix Windows Node.js IPv6 Happy Eyeballs fetch timeouts
+dns.setDefaultResultOrder('ipv4first')
+net.setDefaultAutoSelectFamily?.(false)
 
 const ALLOWED_HOSTS = new Set([
   'www.gutenberg.org',
   'gutenberg.org',
+  'gutenberg.pglaf.org',
+  'aleph.pglaf.org',
   'gutendex.com',
   'www.gutendex.com',
   'openlibrary.org',
@@ -19,7 +27,8 @@ function isAllowedHost(hostname: string): boolean {
   return (
     ALLOWED_HOSTS.has(hostname) ||
     hostname.endsWith('.archive.org') ||
-    hostname.endsWith('.gutenberg.org')
+    hostname.endsWith('.gutenberg.org') ||
+    hostname.endsWith('.pglaf.org')
   )
 }
 
@@ -52,7 +61,8 @@ function devBookProxyPlugin(): Plugin {
             redirect: 'follow',
             signal: AbortSignal.timeout(25000),
             headers: {
-              'User-Agent': 'BookShelf-Reader/1.0',
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) BookShelfReader/1.0',
             },
           })
 

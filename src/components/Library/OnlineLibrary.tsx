@@ -74,7 +74,7 @@ const TOPICS = [
 
 export default function OnlineLibrary() {
   const navigate = useNavigate()
-  const { books, addBook } = useLibraryStore()
+  const { books, addBook, loadFile } = useLibraryStore()
 
   const [source, setSource] = useState<ApiSourceId>('gutenberg')
   const [query, setQuery] = useState('')
@@ -139,36 +139,70 @@ export default function OnlineLibrary() {
     setSubmittedQuery(query)
   }
 
-  const handleOpenBook = async (item: OnlineBookItem) => {
+  const triggerBrowserDownload = (file: File) => {
+    const url = URL.createObjectURL(file)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = file.name
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  const ensureBookDownloaded = async (item: OnlineBookItem): Promise<File> => {
     const existing = books.find((b) => b.id === item.uid)
     if (existing) {
-      navigate(`/read/${item.uid}`)
-      return
+      const existingFile = await loadFile(item.uid)
+      if (existingFile) return existingFile
     }
 
+    const downloaded = await downloadOnlineBook(item)
+    addBook({
+      id: item.uid,
+      name: item.title,
+      author: downloaded.author || item.author,
+      format: downloaded.format,
+      size: downloaded.file.size,
+      file: downloaded.file,
+      addedAt: Date.now(),
+      progress: 0,
+      currentPage: 1,
+      totalPages: 0,
+      coverUrl: downloaded.coverUrl || item.coverUrl,
+    })
+    return downloaded.file
+  }
+
+  const handleOpenBook = async (item: OnlineBookItem) => {
     setDownloadingUid(item.uid)
     setError(null)
     try {
-      const downloaded = await downloadOnlineBook(item)
-      addBook({
-        id: item.uid,
-        name: item.title,
-        author: downloaded.author || item.author,
-        format: downloaded.format,
-        size: downloaded.file.size,
-        file: downloaded.file,
-        addedAt: Date.now(),
-        progress: 0,
-        currentPage: 1,
-        totalPages: 0,
-        coverUrl: downloaded.coverUrl || item.coverUrl,
-      })
+      await ensureBookDownloaded(item)
       navigate(`/read/${item.uid}`)
     } catch (err) {
       setError(
         err instanceof Error
           ? `Could not open "${item.title}": ${err.message}`
           : `Could not open "${item.title}".`
+      )
+    } finally {
+      setDownloadingUid(null)
+    }
+  }
+
+  const handleSaveToDevice = async (e: React.MouseEvent, item: OnlineBookItem) => {
+    e.stopPropagation()
+    setDownloadingUid(item.uid)
+    setError(null)
+    try {
+      const file = await ensureBookDownloaded(item)
+      triggerBrowserDownload(file)
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? `Could not download "${item.title}": ${err.message}`
+          : `Could not download "${item.title}".`
       )
     } finally {
       setDownloadingUid(null)
@@ -356,25 +390,30 @@ export default function OnlineLibrary() {
                     {/* Hover / Downloading overlay */}
                     <div
                       className={clsx(
-                        'absolute inset-0 bg-black/65 backdrop-blur-[2px] flex flex-col items-center justify-center gap-2 transition-opacity p-3 text-center',
+                        'absolute inset-0 bg-black/70 backdrop-blur-[2px] flex flex-col items-center justify-center gap-2 transition-opacity p-3 text-center',
                         isDownloading ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
                       )}
                     >
                       {isDownloading ? (
                         <>
                           <Loader2 className="w-7 h-7 animate-spin text-amber-400" />
-                          <span className="text-xs font-medium text-white">Opening book…</span>
+                          <span className="text-xs font-medium text-white">Fetching book…</span>
                         </>
                       ) : (
                         <>
-                          <div className="px-3 py-1.5 rounded-xl bg-amber-600 text-white text-xs font-semibold flex items-center gap-1.5 shadow-lg">
-                            {isSaved ? (
-                              <BookOpen className="w-3.5 h-3.5" />
-                            ) : (
-                              <Download className="w-3.5 h-3.5" />
-                            )}
+                          <div className="px-3 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold flex items-center gap-1.5 shadow-lg">
+                            <BookOpen className="w-3.5 h-3.5" />
                             <span>{isSaved ? 'Read Now' : 'Open Book'}</span>
                           </div>
+                          <button
+                            type="button"
+                            onClick={(e) => void handleSaveToDevice(e, item)}
+                            className="px-2.5 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-white text-[11px] font-medium flex items-center gap-1 border border-white/15"
+                            title="Save file to device"
+                          >
+                            <Download className="w-3 h-3" />
+                            <span>Save File</span>
+                          </button>
                           {item.subtitle && (
                             <span className="text-[10px] text-gray-300">{item.subtitle}</span>
                           )}

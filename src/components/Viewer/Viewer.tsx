@@ -12,6 +12,7 @@ import {
   ChevronLeft,
   ChevronRight,
   BookOpen,
+  Download,
 } from 'lucide-react'
 import { useLibraryStore } from '../../store/libraryStore'
 import { useReaderStore } from '../../store/readerStore'
@@ -332,6 +333,25 @@ export default function Viewer() {
               title="View all bookmarks"
             >
               <span className="text-xs font-semibold px-1 text-gray-400 hover:text-white">Bookmarks</span>
+            </button>
+
+            {/* Download to Device */}
+            <button
+              onClick={() => {
+                if (!file) return
+                const url = URL.createObjectURL(file)
+                const a = document.createElement('a')
+                a.href = url
+                a.download = file.name
+                document.body.appendChild(a)
+                a.click()
+                a.remove()
+                setTimeout(() => URL.revokeObjectURL(url), 1000)
+              }}
+              className="p-2 text-gray-300 hover:text-white rounded-xl hover:bg-white/10 transition-colors"
+              title="Download book file to device"
+            >
+              <Download className="w-4 h-4" />
             </button>
 
             {/* Appearance Aa Menu */}

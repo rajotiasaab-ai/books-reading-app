@@ -30,7 +30,7 @@ export interface DownloadedBook {
 async function fetchViaProxy(
   targetUrl: string,
   signal?: AbortSignal,
-  timeoutMs = 12000
+  timeoutMs = 15000
 ): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -41,8 +41,6 @@ async function fetchViaProxy(
   try {
     const proxyUrl = `/api/proxy?url=${encodeURIComponent(targetUrl)}`
     const res = await fetch(proxyUrl, { signal: controller.signal })
-
-    // If proxy route isn't available (404), fall back to direct fetch
     if (res.status === 404) {
       return await fetch(targetUrl, { signal: controller.signal })
     }
@@ -70,8 +68,36 @@ function makeSafeFilename(title: string, ext: string): string {
   return `${clean}.${ext}`
 }
 
+function encodeArchivePath(name: string): string {
+  return name
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/')
+}
+
+async function tryFetchBookBinary(
+  url: string,
+  expectedFormat: BookFormat,
+  timeoutMs = 15000
+): Promise<Blob | null> {
+  try {
+    const res = await fetchViaProxy(url, undefined, timeoutMs)
+    if (!res.ok) return null
+    const ct = (res.headers.get('content-type') || '').toLowerCase()
+    // Reject HTML maintenance/error pages when expecting binary EPUB/PDF/TXT
+    if (expectedFormat !== 'html' && ct.includes('text/html')) {
+      return null
+    }
+    const blob = await res.blob()
+    if (blob.size < 200) return null
+    return blob
+  } catch {
+    return null
+  }
+}
+
 // ============================================================================
-// 1. PROJECT GUTENBERG (GUTENDEX)
+// 1. PROJECT GUTENBERG (GUTENDEX + PGLAF MIRROR + ARCHIVE GUTENBERG FALLBACK)
 // ============================================================================
 interface GutendexBook {
   id: number
@@ -112,51 +138,146 @@ async function searchGutenberg(
   page: number,
   signal?: AbortSignal
 ): Promise<SearchPageResult> {
-  const params = new URLSearchParams({ page: String(page) })
-  if (query.trim()) params.set('search', query.trim())
-  if (topic) params.set('topic', topic)
+  try {
+    const params = new URLSearchParams({ page: String(page) })
+    if (query.trim()) params.set('search', query.trim())
+    if (topic) params.set('topic', topic)
 
-  const data = await fetchJsonViaProxy<GutendexResponse>(
-    `https://gutendex.com/books?${params.toString()}`,
-    signal
-  )
+    const data = await fetchJsonViaProxy<GutendexResponse>(
+      `https://gutendex.com/books?${params.toString()}`,
+      signal,
+      12000
+    )
 
-  return {
-    items: (data.results || []).map((b) => {
-      const picked = pickGutenbergFormat(b.formats || {})
-      return {
-        uid: `gutenberg-${b.id}`,
-        source: 'gutenberg',
-        title: b.title,
-        author: b.authors?.[0]?.name?.replace(/,\s*/g, ' ').trim() || 'Unknown Author',
-        coverUrl: b.formats?.['image/jpeg'],
-        formatHint: picked?.format.toUpperCase() || 'EPUB',
-        subtitle: `${(b.download_count || 0).toLocaleString()} reads`,
-        payload: b as unknown as Record<string, unknown>,
-      }
-    }),
-    totalCount: data.count || 0,
-    hasNext: Boolean(data.next),
-    hasPrev: Boolean(data.previous),
+    return {
+      items: (data.results || []).map((b) => {
+        const picked = pickGutenbergFormat(b.formats || {})
+        return {
+          uid: `gutenberg-${b.id}`,
+          source: 'gutenberg',
+          title: b.title,
+          author: b.authors?.[0]?.name?.replace(/,\s*/g, ' ').trim() || 'Unknown Author',
+          coverUrl: b.formats?.['image/jpeg'],
+          formatHint: picked?.format.toUpperCase() || 'EPUB',
+          subtitle: `${(b.download_count || 0).toLocaleString()} reads`,
+          payload: b as unknown as Record<string, unknown>,
+        }
+      }),
+      totalCount: data.count || 0,
+      hasNext: Boolean(data.next),
+      hasPrev: Boolean(data.previous),
+    }
+  } catch (err) {
+    if (signal?.aborted) throw err
+    // Fallback to Internet Archive's Project Gutenberg collection mirror if Gutendex is down
+    return searchArchive(query, topic, page, signal, 'collection:gutenberg')
   }
 }
 
-async function downloadGutenbergById(id: string | number): Promise<DownloadedBook> {
-  const data = await fetchJsonViaProxy<GutendexBook>(`https://gutendex.com/books/${id}`)
-  const picked = pickGutenbergFormat(data.formats || {})
-  if (!picked) throw new Error('No EPUB or TXT format available for this Gutenberg book.')
+async function downloadGutenbergMirrored(
+  id: string | number,
+  title: string,
+  author?: string,
+  coverUrl?: string,
+  formats?: Record<string, string>
+): Promise<DownloadedBook> {
+  const numId = String(id).trim()
 
-  const res = await fetchViaProxy(picked.url, undefined, 20000)
-  if (!res.ok) throw new Error(`Download failed (${res.status})`)
-  const blob = await res.blob()
-  const author = data.authors?.[0]?.name?.replace(/,\s*/g, ' ').trim()
+  // 1. Try Gutenberg PGLAF mirror + primary Gutenberg URLs (short timeout so fallback is fast)
+  const candidates: { url: string; format: BookFormat; mime: string }[] = [
+    {
+      url: `https://gutenberg.pglaf.org/cache/epub/${numId}/pg${numId}-images-3.epub`,
+      format: 'epub',
+      mime: 'application/epub+zip',
+    },
+    {
+      url: `https://gutenberg.pglaf.org/cache/epub/${numId}/pg${numId}-images.epub`,
+      format: 'epub',
+      mime: 'application/epub+zip',
+    },
+    {
+      url: `https://gutenberg.pglaf.org/cache/epub/${numId}/pg${numId}.txt`,
+      format: 'txt',
+      mime: 'text/plain',
+    },
+  ]
 
-  return {
-    file: new File([blob], makeSafeFilename(data.title, picked.format), { type: picked.mime }),
-    format: picked.format,
-    coverUrl: data.formats?.['image/jpeg'],
-    author,
+  if (formats) {
+    const picked = pickGutenbergFormat(formats)
+    if (picked) {
+      candidates.push(picked)
+    }
   }
+
+  for (const c of candidates) {
+    const blob = await tryFetchBookBinary(c.url, c.format, 6000)
+    if (blob) {
+      return {
+        file: new File([blob], makeSafeFilename(title, c.format), { type: c.mime }),
+        format: c.format,
+        coverUrl,
+        author,
+      }
+    }
+  }
+
+  // 2. Reliable fallback: Internet Archive's Project Gutenberg mirror!
+  const padded5 = numId.padStart(5, '0')
+  const cleanTitle = title.split(/[;:(]/)[0].replace(/"/g, '').trim()
+  const searchQueries = [
+    `collection:gutenberg AND identifier:*${padded5}gut`,
+    ...(cleanTitle ? [`collection:gutenberg AND title:"${cleanTitle}"`] : []),
+  ]
+
+  for (const q of searchQueries) {
+    try {
+      const params = new URLSearchParams({
+        q,
+        wt: 'json',
+        rows: '3',
+        output: 'json',
+      })
+      params.append('fl[]', 'identifier')
+      params.append('fl[]', 'title')
+      params.append('sort[]', 'downloads desc')
+
+      const data = await fetchJsonViaProxy<ArchiveSearchResponse>(
+        `https://archive.org/advancedsearch.php?${params.toString()}`,
+        undefined,
+        12000
+      )
+      for (const doc of data.response?.docs || []) {
+        try {
+          const book = await downloadArchiveItem(doc.identifier, title, author)
+          return { ...book, coverUrl: coverUrl || book.coverUrl }
+        } catch {
+          // try next matching mirror item
+        }
+      }
+    } catch {
+      // try next search query
+    }
+  }
+
+  throw new Error(
+    'Project Gutenberg servers are temporarily in maintenance and no mirror edition matched this title.'
+  )
+}
+
+async function downloadGutenbergById(id: string | number): Promise<DownloadedBook> {
+  const data = await fetchJsonViaProxy<GutendexBook>(
+    `https://gutendex.com/books/${id}`,
+    undefined,
+    10000
+  )
+  const author = data.authors?.[0]?.name?.replace(/,\s*/g, ' ').trim()
+  return downloadGutenbergMirrored(
+    data.id,
+    data.title,
+    author,
+    data.formats?.['image/jpeg'],
+    data.formats
+  )
 }
 
 // ============================================================================
@@ -179,15 +300,18 @@ interface ArchiveSearchResponse {
 
 interface ArchiveFileEntry {
   name: string
+  source?: string
   format?: string
   size?: string
+  private?: string
 }
 
 async function searchArchive(
   query: string,
   topic: string,
   page: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  extraCollection?: string
 ): Promise<SearchPageResult> {
   const parts = [
     'mediatype:texts',
@@ -195,6 +319,7 @@ async function searchArchive(
     'NOT collection:inlibrary',
     'NOT collection:printdisabled',
   ]
+  if (extraCollection) parts.push(extraCollection)
   if (query.trim()) parts.push(`(${query.trim()})`)
   if (topic) parts.push(`subject:(${topic})`)
 
@@ -226,13 +351,13 @@ async function searchArchive(
       const creator = Array.isArray(d.creator) ? d.creator[0] : d.creator || 'Internet Archive'
       return {
         uid: `archive-${d.identifier}`,
-        source: 'archive',
+        source: extraCollection === 'collection:gutenberg' ? 'gutenberg' : 'archive',
         title,
         author: creator,
         coverUrl: `https://archive.org/services/img/${d.identifier}`,
         formatHint: 'PDF / EPUB',
         subtitle: d.downloads ? `${d.downloads.toLocaleString()} reads` : d.year,
-        payload: { identifier: d.identifier, title, creator },
+        payload: { identifier: d.identifier, title, creator, isArchiveMirror: true },
       }
     }),
     totalCount,
@@ -247,44 +372,74 @@ async function downloadArchiveItem(
   author?: string
 ): Promise<DownloadedBook> {
   const meta = await fetchJsonViaProxy<{ result?: ArchiveFileEntry[] }>(
-    `https://archive.org/metadata/${encodeURIComponent(identifier)}/files`
+    `https://archive.org/metadata/${encodeURIComponent(identifier)}/files`,
+    undefined,
+    15000
   )
   const files = meta.result || []
 
-  const maxBytes = 25 * 1024 * 1024 // keep downloads fast in browser
+  const maxBytes = 25 * 1024 * 1024
   const eligible = files.filter((f) => {
+    if (f.private === 'true') return false
     const size = Number(f.size || 0)
     return size === 0 || size <= maxBytes
   })
 
-  const epub = eligible.find((f) => f.name.toLowerCase().endsWith('.epub'))
-  const pdf = eligible.find(
-    (f) => f.name.toLowerCase().endsWith('.pdf') && !f.name.toLowerCase().includes('_encrypted')
-  )
-  const txt = eligible.find(
-    (f) => f.name.toLowerCase().endsWith('.txt') && !f.name.toLowerCase().endsWith('_meta.txt')
-  )
+  const isEpub = (f: ArchiveFileEntry) => f.name.toLowerCase().endsWith('.epub')
+  const isPdf = (f: ArchiveFileEntry) =>
+    f.name.toLowerCase().endsWith('.pdf') && !f.name.toLowerCase().includes('_encrypted')
+  const isTxt = (f: ArchiveFileEntry) =>
+    f.name.toLowerCase().endsWith('.txt') &&
+    !f.name.toLowerCase().endsWith('_meta.txt') &&
+    !f.name.toLowerCase().endsWith('_djvu.txt')
 
-  const chosen = epub || pdf || txt
-  if (!chosen) {
-    throw new Error('No open EPUB, PDF, or TXT file under 25 MB found in this Archive item.')
+  // Build ordered list of candidates (prefer original clean files before OCR derivatives)
+  const ordered: { entry: ArchiveFileEntry; format: BookFormat; mime: string }[] = []
+  const pushUnique = (entry: ArchiveFileEntry | undefined, format: BookFormat, mime: string) => {
+    if (entry && !ordered.some((o) => o.entry.name === entry.name)) {
+      ordered.push({ entry, format, mime })
+    }
   }
 
-  const ext: BookFormat = epub ? 'epub' : pdf ? 'pdf' : 'txt'
-  const mime =
-    ext === 'epub' ? 'application/epub+zip' : ext === 'pdf' ? 'application/pdf' : 'text/plain'
+  pushUnique(
+    eligible.find((f) => isEpub(f) && f.source === 'original'),
+    'epub',
+    'application/epub+zip'
+  )
+  pushUnique(
+    eligible.find((f) => isPdf(f) && f.source === 'original'),
+    'pdf',
+    'application/pdf'
+  )
+  pushUnique(eligible.find(isEpub), 'epub', 'application/epub+zip')
+  pushUnique(eligible.find(isPdf), 'pdf', 'application/pdf')
+  pushUnique(eligible.find(isTxt), 'txt', 'text/plain')
+  pushUnique(
+    eligible.find((f) => f.name.toLowerCase().endsWith('_djvu.txt')),
+    'txt',
+    'text/plain'
+  )
 
-  const fileUrl = `https://archive.org/download/${encodeURIComponent(identifier)}/${encodeURIComponent(chosen.name)}`
-  const res = await fetchViaProxy(fileUrl, undefined, 25000)
-  if (!res.ok) throw new Error(`Archive download failed (${res.status})`)
-
-  const blob = await res.blob()
-  return {
-    file: new File([blob], makeSafeFilename(title, ext), { type: mime }),
-    format: ext,
-    coverUrl: `https://archive.org/services/img/${identifier}`,
-    author,
+  if (ordered.length === 0) {
+    throw new Error('No open EPUB, PDF, or TXT file under 25 MB found in this item.')
   }
+
+  for (const candidate of ordered) {
+    const fileUrl = `https://archive.org/download/${encodeURIComponent(identifier)}/${encodeArchivePath(candidate.entry.name)}`
+    const blob = await tryFetchBookBinary(fileUrl, candidate.format, 25000)
+    if (blob) {
+      return {
+        file: new File([blob], makeSafeFilename(title, candidate.format), {
+          type: candidate.mime,
+        }),
+        format: candidate.format,
+        coverUrl: `https://archive.org/services/img/${identifier}`,
+        author,
+      }
+    }
+  }
+
+  throw new Error('This Archive item is borrow-only or protected and cannot be downloaded directly.')
 }
 
 // ============================================================================
@@ -296,6 +451,7 @@ interface OpenLibraryDoc {
   author_name?: string[]
   cover_i?: number
   first_publish_year?: number
+  lending_identifier_s?: string
   ia?: string[]
   id_project_gutenberg?: string[]
 }
@@ -316,7 +472,8 @@ async function searchOpenLibrary(
     q,
     has_fulltext: 'true',
     ebook_access: 'public',
-    fields: 'key,title,author_name,cover_i,first_publish_year,id_project_gutenberg,ia',
+    fields:
+      'key,title,author_name,cover_i,first_publish_year,lending_identifier_s,id_project_gutenberg,ia',
     limit: '16',
     page: String(page),
   })
@@ -352,29 +509,50 @@ async function downloadOpenLibraryItem(doc: OpenLibraryDoc): Promise<DownloadedB
   const coverUrl = doc.cover_i ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-M.jpg` : undefined
   const author = doc.author_name?.[0]
 
+  // 1. Try Gutenberg edition (with PGLAF + Archive mirror built in)
   if (doc.id_project_gutenberg?.length) {
     try {
       const book = await downloadGutenbergById(doc.id_project_gutenberg[0])
       return { ...book, coverUrl: coverUrl || book.coverUrl, author: author || book.author }
     } catch {
-      // fall through to Internet Archive IDs
+      // fall through to public IA scans
     }
   }
 
-  for (const iaId of (doc.ia || []).slice(0, 3)) {
+  // 2. Prioritize public Archive.org scans (preferring *gut / *goog / *uoft, skipping lending_identifier_s)
+  const iaList = (doc.ia || []).filter((id) => id !== doc.lending_identifier_s)
+  const sortedIa = [...iaList].sort((a, b) => {
+    const score = (id: string) =>
+      id.endsWith('gut') ? 0 : id.endsWith('goog') || id.endsWith('uoft') ? 1 : 2
+    return score(a) - score(b)
+  })
+
+  for (const iaId of sortedIa.slice(0, 5)) {
     try {
       const book = await downloadArchiveItem(iaId, doc.title, author)
       return { ...book, coverUrl: coverUrl || book.coverUrl }
     } catch {
-      // try next edition
+      // try next scan
     }
   }
 
-  throw new Error('Could not find an open EPUB/PDF file for this Open Library edition.')
+  // 3. Final fallback: search Internet Archive directly by title
+  const res = await searchArchive(doc.title, '', 1)
+  for (const item of res.items.slice(0, 2)) {
+    try {
+      const p = item.payload as { identifier: string; title: string; creator?: string }
+      const book = await downloadArchiveItem(p.identifier, doc.title, author || p.creator)
+      return { ...book, coverUrl: coverUrl || book.coverUrl }
+    } catch {
+      // next
+    }
+  }
+
+  throw new Error('Could not find an open-access EPUB/PDF scan for this Open Library book.')
 }
 
 // ============================================================================
-// 4. WIKISOURCE (FREE PUBLIC DOMAIN BOOKS & POETRY AS EPUB)
+// 4. WIKISOURCE (FREE PUBLIC DOMAIN BOOKS & POETRY AS EPUB / TXT)
 // ============================================================================
 interface WikisourceSearchItem {
   pageid: number
@@ -436,24 +614,18 @@ async function downloadWikisourceItem(item: WikisourceSearchItem): Promise<Downl
   const pageSlug = item.title.replace(/ /g, '_')
   const epubUrl = `https://ws-export.wmcloud.org/?lang=en&format=epub&page=${encodeURIComponent(pageSlug)}`
 
-  try {
-    const res = await fetchViaProxy(epubUrl, undefined, 20000)
-    if (res.ok) {
-      const blob = await res.blob()
-      if (blob.size > 500) {
-        return {
-          file: new File([blob], makeSafeFilename(item.title, 'epub'), {
-            type: 'application/epub+zip',
-          }),
-          format: 'epub',
-          author: 'Wikisource',
-        }
-      }
+  const epubBlob = await tryFetchBookBinary(epubUrl, 'epub', 20000)
+  if (epubBlob) {
+    return {
+      file: new File([epubBlob], makeSafeFilename(item.title, 'epub'), {
+        type: 'application/epub+zip',
+      }),
+      format: 'epub',
+      author: 'Wikisource',
     }
-  } catch {
-    // fallback to plain text extract below
   }
 
+  // Fallback to clean text extract from Wikisource API
   const params = new URLSearchParams({
     action: 'query',
     titles: item.title,
@@ -505,18 +677,18 @@ export async function searchOnlineCatalog(
 export async function downloadOnlineBook(item: OnlineBookItem): Promise<DownloadedBook> {
   switch (item.source) {
     case 'gutenberg': {
-      const b = item.payload as unknown as GutendexBook
-      const picked = pickGutenbergFormat(b.formats || {})
-      if (!picked) throw new Error('No readable format available for this book.')
-      const res = await fetchViaProxy(picked.url, undefined, 20000)
-      if (!res.ok) throw new Error(`Download failed (${res.status})`)
-      const blob = await res.blob()
-      return {
-        file: new File([blob], makeSafeFilename(item.title, picked.format), { type: picked.mime }),
-        format: picked.format,
-        coverUrl: item.coverUrl,
-        author: item.author,
+      if ((item.payload as { isArchiveMirror?: boolean }).isArchiveMirror) {
+        const p = item.payload as { identifier: string; title: string; creator?: string }
+        return downloadArchiveItem(p.identifier, p.title, p.creator)
       }
+      const b = item.payload as unknown as GutendexBook
+      return downloadGutenbergMirrored(
+        b.id,
+        item.title,
+        item.author,
+        item.coverUrl,
+        b.formats || {}
+      )
     }
     case 'archive': {
       const p = item.payload as { identifier: string; title: string; creator?: string }
