@@ -119,40 +119,50 @@ export default function BookCard({ book, viewMode, onOpen, onRemove }: Props) {
     >
       {/* 3D Book Cover */}
       <div className="relative aspect-[2/3] rounded-2xl overflow-hidden shadow-xl group-hover:shadow-2xl group-hover:shadow-amber-500/10 transition-all duration-300 group-hover:-translate-y-1.5 border border-white/10">
-        {/* Cover Background */}
-        <div
-          className={clsx(
-            'w-full h-full bg-gradient-to-br flex flex-col justify-between p-4 relative',
-            coverGradient
-          )}
-        >
-          {/* Realistic Physical Book Spine Crease & Shadow */}
-          <div className="absolute inset-y-0 left-0 w-3 bg-gradient-to-r from-black/50 via-black/20 to-transparent border-r border-white/10 z-10" />
-          <div className="absolute inset-y-0 right-0 w-1.5 bg-gradient-to-l from-black/40 to-transparent z-10" />
+          {/* Cover Background */}
+          <div
+            className={clsx(
+              'w-full h-full bg-gradient-to-br flex flex-col justify-between p-4 relative',
+              coverGradient
+            )}
+          >
+            {book.coverUrl && (
+              <img
+                src={book.coverUrl}
+                alt={book.name}
+                loading="lazy"
+                className="absolute inset-0 w-full h-full object-cover"
+              />
+            )}
+            {/* Realistic Physical Book Spine Crease & Shadow */}
+            <div className="absolute inset-y-0 left-0 w-3 bg-gradient-to-r from-black/50 via-black/20 to-transparent border-r border-white/10 z-10" />
+            <div className="absolute inset-y-0 right-0 w-1.5 bg-gradient-to-l from-black/40 to-transparent z-10" />
 
-          {/* Top badge */}
-          <div className="flex items-center justify-between z-10 pl-1.5">
-            {formatBadge}
-            <button
-              onClick={(e) => {
-                e.stopPropagation()
-                onRemove()
-              }}
-              className="p-1.5 rounded-lg bg-black/50 hover:bg-red-500/80 text-white/70 hover:text-white backdrop-blur-md opacity-0 group-hover:opacity-100 transition-all"
-              aria-label="Remove book"
-              title="Remove from library"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          </div>
+            {/* Top badge */}
+            <div className="flex items-center justify-between z-10 pl-1.5">
+              {formatBadge}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onRemove()
+                }}
+                className="p-1.5 rounded-lg bg-black/50 hover:bg-red-500/80 text-white/70 hover:text-white backdrop-blur-md opacity-0 group-hover:opacity-100 transition-all"
+                aria-label="Remove book"
+                title="Remove from library"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
 
-          {/* Center Book Art / Embossed Title */}
-          <div className="my-auto text-center px-2 z-10 pl-3">
-            <BookOpen className="w-10 h-10 mx-auto text-amber-400/40 mb-2 group-hover:scale-110 transition-transform" />
-            <h3 className="text-white font-serif font-bold text-sm line-clamp-3 leading-snug drop-shadow-md">
-              {book.name}
-            </h3>
-          </div>
+            {/* Center Book Art / Embossed Title (when no cover image) */}
+            {!book.coverUrl && (
+              <div className="my-auto text-center px-2 z-10 pl-3">
+                <BookOpen className="w-10 h-10 mx-auto text-amber-400/40 mb-2 group-hover:scale-110 transition-transform" />
+                <h3 className="text-white font-serif font-bold text-sm line-clamp-3 leading-snug drop-shadow-md">
+                  {book.name}
+                </h3>
+              </div>
+            )}
 
           {/* Bottom Progress Ribbon */}
           <div className="z-10 pl-1.5">
@@ -184,9 +194,9 @@ export default function BookCard({ book, viewMode, onOpen, onRemove }: Props) {
         <h4 className="text-white text-sm font-medium leading-snug line-clamp-1 group-hover:text-amber-400 transition-colors">
           {book.name}
         </h4>
-        <div className="flex items-center justify-between text-xs text-gray-400 mt-1">
-          <span>{formatFileSize(book.size)}</span>
-          {book.lastRead && <span>{formatTime(book.lastRead)}</span>}
+        <div className="flex items-center justify-between text-xs text-gray-400 mt-1 gap-2">
+          <span className="truncate">{book.author || formatFileSize(book.size)}</span>
+          {book.lastRead && <span className="shrink-0">{formatTime(book.lastRead)}</span>}
         </div>
       </div>
     </div>

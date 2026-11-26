@@ -1,11 +1,12 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { BookFile, BookFormat } from '../utils/fileDetection'
+import { saveBookFile, getBookFile, deleteBookFile } from '../utils/bookStorage'
 
-// We store metadata only in Zustand/localStorage (not the File object itself)
 export interface BookMeta {
   id: string
   name: string
+  author?: string
   format: BookFormat
   size: number
   addedAt: number
@@ -18,12 +19,13 @@ export interface BookMeta {
 
 interface LibraryState {
   books: BookMeta[]
-  // In-memory map: id -> File (not persisted)
+  // In-memory map: id -> File (backed by IndexedDB for persistence across refreshes)
   fileMap: Record<string, File>
   addBook: (book: BookFile) => void
   removeBook: (id: string) => void
   updateProgress: (id: string, page: number, total: number) => void
   getFile: (id: string) => File | undefined
+  loadFile: (id: string) => Promise<File | undefined>
   sortBy: 'addedAt' | 'lastRead' | 'name' | 'progress'
   setSortBy: (sort: LibraryState['sortBy']) => void
   filterFormat: BookFormat | 'all'
@@ -42,6 +44,7 @@ export const useLibraryStore = create<LibraryState>()(
         const meta: BookMeta = {
           id: book.id,
           name: book.name,
+          author: book.author,
           format: book.format,
           size: book.size,
           addedAt: book.addedAt,
@@ -51,39 +54,57 @@ export const useLibraryStore = create<LibraryState>()(
           totalPages: book.totalPages,
           coverUrl: book.coverUrl,
         }
+        void saveBookFile(book.id, book.file)
         set((s) => ({
-          books: [meta, ...s.books.filter(b => b.id !== book.id)],
+          books: [meta, ...s.books.filter((b) => b.id !== book.id)],
           fileMap: { ...s.fileMap, [book.id]: book.file },
         }))
       },
 
-      removeBook: (id) =>
+      removeBook: (id) => {
+        void deleteBookFile(id)
         set((s) => {
           const newFileMap = { ...s.fileMap }
           delete newFileMap[id]
           return {
-            books: s.books.filter(b => b.id !== id),
+            books: s.books.filter((b) => b.id !== id),
             fileMap: newFileMap,
           }
-        }),
+        })
+      },
 
       updateProgress: (id, page, total) =>
         set((s) => ({
-          books: s.books.map(b =>
+          books: s.books.map((b) =>
             b.id === id
-              ? { ...b, currentPage: page, totalPages: total, progress: total > 0 ? Math.round((page / total) * 100) : 0, lastRead: Date.now() }
+              ? {
+                  ...b,
+                  currentPage: page,
+                  totalPages: total,
+                  progress: total > 0 ? Math.round((page / total) * 100) : 0,
+                  lastRead: Date.now(),
+                }
               : b
           ),
         })),
 
       getFile: (id) => get().fileMap[id],
 
+      loadFile: async (id) => {
+        const cached = get().fileMap[id]
+        if (cached) return cached
+        const stored = await getBookFile(id)
+        if (stored) {
+          set((s) => ({ fileMap: { ...s.fileMap, [id]: stored } }))
+        }
+        return stored
+      },
+
       setSortBy: (sort) => set({ sortBy: sort }),
       setFilterFormat: (f) => set({ filterFormat: f }),
     }),
     {
       name: 'bookshelf-library',
-      // Only persist metadata, not files
       partialize: (state) => ({
         books: state.books,
         sortBy: state.sortBy,

@@ -27,7 +27,7 @@ import clsx from 'clsx'
 export default function Viewer() {
   const { bookId } = useParams<{ bookId: string }>()
   const navigate = useNavigate()
-  const { books, getFile, updateProgress } = useLibraryStore()
+  const { books, getFile, loadFile, updateProgress } = useLibraryStore()
   const {
     isFullscreen,
     toggleFullscreen,
@@ -40,6 +40,7 @@ export default function Viewer() {
   } = useReaderStore()
 
   const [file, setFile] = useState<File | null>(null)
+  const [loadingStoredFile, setLoadingStoredFile] = useState(true)
   const [currentPage, setCurrentPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
 
@@ -57,14 +58,36 @@ export default function Viewer() {
   const book = books.find((b) => b.id === bookId)
 
   useEffect(() => {
-    if (!book) return
-    const f = getFile(book.id)
-    if (f) {
-      setFile(f)
+    let active = true
+    async function resolveFile() {
+      if (!book) {
+        setLoadingStoredFile(false)
+        return
+      }
       setCurrentPage(book.currentPage || 1)
       setTotalPages(book.totalPages || 1)
+
+      const mem = getFile(book.id)
+      if (mem) {
+        if (active) {
+          setFile(mem)
+          setLoadingStoredFile(false)
+        }
+        return
+      }
+
+      setLoadingStoredFile(true)
+      const stored = await loadFile(book.id)
+      if (active) {
+        if (stored) setFile(stored)
+        setLoadingStoredFile(false)
+      }
     }
-  }, [book, getFile])
+    void resolveFile()
+    return () => {
+      active = false
+    }
+  }, [book?.id, getFile, loadFile])
 
   const handlePageChange = (page: number, total: number) => {
     setCurrentPage(page)
@@ -116,6 +139,15 @@ export default function Viewer() {
         <button onClick={() => navigate('/')} className="btn-primary mt-2">
           <ArrowLeft className="w-4 h-4" /> Back to Library
         </button>
+      </div>
+    )
+  }
+
+  if (loadingStoredFile) {
+    return (
+      <div className="flex flex-col items-center justify-center h-[80vh] gap-4 text-amber-400">
+        <BookOpen className="w-10 h-10 animate-pulse" />
+        <p className="text-sm text-gray-400">Loading book from device storage…</p>
       </div>
     )
   }

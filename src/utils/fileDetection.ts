@@ -3,6 +3,7 @@ export type BookFormat = 'pdf' | 'epub' | 'txt' | 'md' | 'html' | 'cbz' | 'unkno
 export interface BookFile {
   id: string
   name: string
+  author?: string
   format: BookFormat
   size: number
   file: File

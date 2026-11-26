@@ -9,6 +9,8 @@ import {
   Search,
   Sparkles,
   BookMarked,
+  Globe,
+  Library as LibraryIcon,
 } from 'lucide-react'
 import { useLibraryStore } from '../../store/libraryStore'
 import {
@@ -18,6 +20,7 @@ import {
   type BookFormat,
 } from '../../utils/fileDetection'
 import BookCard from './BookCard'
+import OnlineLibrary from './OnlineLibrary'
 import clsx from 'clsx'
 
 const FORMAT_OPTIONS: { value: BookFormat | 'all'; label: string }[] = [
@@ -55,6 +58,7 @@ export default function Library() {
     setFilterFormat,
   } = useLibraryStore()
 
+  const [activeTab, setActiveTab] = useState<'shelf' | 'online'>('shelf')
   const [isDragging, setIsDragging] = useState(false)
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
   const [searchQuery, setSearchQuery] = useState('')
@@ -156,18 +160,62 @@ export default function Library() {
           </p>
         </div>
 
-        {/* Search Bar */}
-        <div className="relative w-full sm:w-72">
-          <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search your library…"
-            className="w-full bg-gray-900 border border-gray-800 rounded-xl pl-9 pr-4 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-amber-500/60 transition-colors"
-          />
-        </div>
+        {/* Search Bar (on shelf tab) */}
+        {activeTab === 'shelf' && (
+          <div className="relative w-full sm:w-72">
+            <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search your library…"
+              className="w-full bg-gray-900 border border-gray-800 rounded-xl pl-9 pr-4 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-amber-500/60 transition-colors"
+            />
+          </div>
+        )}
       </div>
+
+      {/* 🍏 Navigation Tabs: My Bookshelf vs Online Library */}
+      <div className="flex items-center gap-2 mb-8 bg-gray-900/70 p-1.5 rounded-2xl border border-gray-800 w-fit">
+        <button
+          onClick={() => setActiveTab('shelf')}
+          className={clsx(
+            'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all',
+            activeTab === 'shelf'
+              ? 'bg-amber-600 text-white shadow-md'
+              : 'text-gray-400 hover:text-white hover:bg-gray-800/60'
+          )}
+        >
+          <LibraryIcon className="w-4 h-4" />
+          <span>My Bookshelf</span>
+          {books.length > 0 && (
+            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-black/25 font-mono">
+              {books.length}
+            </span>
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveTab('online')}
+          className={clsx(
+            'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all',
+            activeTab === 'online'
+              ? 'bg-amber-600 text-white shadow-md'
+              : 'text-gray-400 hover:text-white hover:bg-gray-800/60'
+          )}
+        >
+          <Globe className="w-4 h-4" />
+          <span>Online Library</span>
+          <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold hidden sm:inline">
+            70,000+ Free
+          </span>
+        </button>
+      </div>
+
+      {activeTab === 'online' ? (
+        <OnlineLibrary />
+      ) : (
+        <>
 
       {/* 🍏 Apple Style Drag & Drop Zone */}
       <div
@@ -337,6 +385,8 @@ export default function Library() {
           <p className="text-xs text-gray-500 mt-1">Try clearing your search query or format filter.</p>
         </div>
       ) : null}
+        </>
+      )}
     </div>
   )
 }
