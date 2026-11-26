@@ -10,36 +10,59 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Library,
+  Archive,
+  ScrollText,
+  RefreshCw,
 } from 'lucide-react'
 import { useLibraryStore } from '../../store/libraryStore'
-import type { BookFormat } from '../../utils/fileDetection'
+import {
+  searchOnlineCatalog,
+  downloadOnlineBook,
+  type ApiSourceId,
+  type OnlineBookItem,
+} from '../../utils/onlineApis'
 import clsx from 'clsx'
 
-interface GutendexAuthor {
+const API_SOURCES: {
+  id: ApiSourceId
   name: string
-  birth_year?: number
-  death_year?: number
-}
-
-interface GutendexBook {
-  id: number
-  title: string
-  authors: GutendexAuthor[]
-  subjects: string[]
-  languages: string[]
-  download_count: number
-  formats: Record<string, string>
-}
-
-interface GutendexResponse {
-  count: number
-  next: string | null
-  previous: string | null
-  results: GutendexBook[]
-}
+  badge: string
+  description: string
+  icon: React.ReactNode
+}[] = [
+  {
+    id: 'gutenberg',
+    name: 'Project Gutenberg',
+    badge: '70k+ EPUBs',
+    description: 'Classic literature & novels via Gutendex API',
+    icon: <BookOpen className="w-4 h-4" />,
+  },
+  {
+    id: 'archive',
+    name: 'Internet Archive',
+    badge: 'PDF & EPUB',
+    description: 'Millions of open public-domain PDFs & EPUB books',
+    icon: <Archive className="w-4 h-4" />,
+  },
+  {
+    id: 'openlibrary',
+    name: 'Open Library',
+    badge: 'Full-Text',
+    description: 'Public full-text editions with rich cover metadata',
+    icon: <Library className="w-4 h-4" />,
+  },
+  {
+    id: 'wikisource',
+    name: 'Wikisource',
+    badge: 'EPUB Export',
+    description: 'Free poetry, plays, essays & historical texts',
+    icon: <ScrollText className="w-4 h-4" />,
+  },
+]
 
 const TOPICS = [
-  { id: '', label: 'Popular Classics' },
+  { id: '', label: 'Popular' },
   { id: 'fiction', label: 'Fiction' },
   { id: 'science fiction', label: 'Sci-Fi' },
   { id: 'philosophy', label: 'Philosophy' },
@@ -49,92 +72,66 @@ const TOPICS = [
   { id: 'poetry', label: 'Poetry' },
 ]
 
-function pickBestFormat(formats: Record<string, string>): {
-  url: string
-  format: BookFormat
-  mime: string
-} | null {
-  const epub = formats['application/epub+zip']
-  if (epub) return { url: epub, format: 'epub', mime: 'application/epub+zip' }
-
-  const txtUtf8 = formats['text/plain; charset=utf-8']
-  if (txtUtf8) return { url: txtUtf8, format: 'txt', mime: 'text/plain' }
-
-  const txt = formats['text/plain; charset=us-ascii'] || formats['text/plain']
-  if (txt) return { url: txt, format: 'txt', mime: 'text/plain' }
-
-  const html = formats['text/html'] || formats['text/html; charset=utf-8']
-  if (html) return { url: html, format: 'html', mime: 'text/html' }
-
-  return null
-}
-
-async function fetchBookBlob(targetUrl: string): Promise<Blob> {
-  // Prefer our Cloudflare Worker proxy so Gutenberg CORS headers never block downloads
-  const proxyUrl = `/api/gutenberg?url=${encodeURIComponent(targetUrl)}`
-  try {
-    const res = await fetch(proxyUrl)
-    if (res.ok) {
-      const contentType = res.headers.get('content-type') || ''
-      // Avoid Vite dev SPA fallback returning index.html
-      if (!contentType.includes('text/html') || targetUrl.endsWith('.htm') || targetUrl.endsWith('.html')) {
-        return await res.blob()
-      }
-    }
-  } catch {
-    // Fallback to direct fetch
-  }
-
-  const direct = await fetch(targetUrl)
-  if (!direct.ok) {
-    throw new Error(`Download failed (${direct.status})`)
-  }
-  return await direct.blob()
-}
-
 export default function OnlineLibrary() {
   const navigate = useNavigate()
   const { books, addBook } = useLibraryStore()
 
+  const [source, setSource] = useState<ApiSourceId>('gutenberg')
   const [query, setQuery] = useState('')
   const [submittedQuery, setSubmittedQuery] = useState('')
   const [topic, setTopic] = useState('')
   const [page, setPage] = useState(1)
-  const [results, setResults] = useState<GutendexBook[]>([])
+
+  const [results, setResults] = useState<OnlineBookItem[]>([])
   const [totalCount, setTotalCount] = useState(0)
   const [hasNext, setHasNext] = useState(false)
   const [hasPrev, setHasPrev] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [downloadingId, setDownloadingId] = useState<number | null>(null)
+  const [downloadingUid, setDownloadingUid] = useState<string | null>(null)
+  const [reloadNonce, setReloadNonce] = useState(0)
 
-  const fetchCatalog = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const params = new URLSearchParams()
-      params.set('page', String(page))
-      if (submittedQuery.trim()) params.set('search', submittedQuery.trim())
-      if (topic) params.set('topic', topic)
+  const activeSourceInfo = API_SOURCES.find((s) => s.id === source)!
 
-      const res = await fetch(`https://gutendex.com/books?${params.toString()}`)
-      if (!res.ok) throw new Error(`Catalog error (${res.status})`)
-      const data: GutendexResponse = await res.json()
-
-      setResults(data.results || [])
-      setTotalCount(data.count || 0)
-      setHasNext(Boolean(data.next))
-      setHasPrev(Boolean(data.previous))
-    } catch {
-      setError('Could not load the Project Gutenberg catalog. Please check your connection and retry.')
-    } finally {
-      setLoading(false)
-    }
-  }, [page, submittedQuery, topic])
+  const fetchCatalog = useCallback(
+    async (signal: AbortSignal) => {
+      setLoading(true)
+      setError(null)
+      try {
+        const res = await searchOnlineCatalog(source, submittedQuery, topic, page, signal)
+        if (signal.aborted) return
+        setResults(res.items)
+        setTotalCount(res.totalCount)
+        setHasNext(res.hasNext)
+        setHasPrev(res.hasPrev)
+      } catch (err) {
+        if (signal.aborted) return
+        const msg =
+          err instanceof Error && err.name === 'AbortError'
+            ? `${activeSourceInfo.name} timed out after 12s. Try switching to another API tab above or click Retry.`
+            : `Could not reach ${activeSourceInfo.name}. Try switching API tabs above or click Retry.`
+        setError(msg)
+        setResults([])
+      } finally {
+        if (!signal.aborted) {
+          setLoading(false)
+        }
+      }
+    },
+    [source, submittedQuery, topic, page, activeSourceInfo.name, reloadNonce]
+  )
 
   useEffect(() => {
-    void fetchCatalog()
+    const controller = new AbortController()
+    void fetchCatalog(controller.signal)
+    return () => controller.abort()
   }, [fetchCatalog])
+
+  const handleSourceSwitch = (nextSource: ApiSourceId) => {
+    setSource(nextSource)
+    setPage(1)
+    setError(null)
+  }
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -142,68 +139,95 @@ export default function OnlineLibrary() {
     setSubmittedQuery(query)
   }
 
-  const handleOpenBook = async (gBook: GutendexBook) => {
-    const bookId = `gutenberg-${gBook.id}`
-    const existing = books.find((b) => b.id === bookId)
+  const handleOpenBook = async (item: OnlineBookItem) => {
+    const existing = books.find((b) => b.id === item.uid)
     if (existing) {
-      navigate(`/read/${bookId}`)
+      navigate(`/read/${item.uid}`)
       return
     }
 
-    const picked = pickBestFormat(gBook.formats)
-    if (!picked) {
-      setError(`"${gBook.title}" has no readable EPUB/TXT/HTML format available.`)
-      return
-    }
-
-    setDownloadingId(gBook.id)
+    setDownloadingUid(item.uid)
     setError(null)
     try {
-      const blob = await fetchBookBlob(picked.url)
-      const safeName = gBook.title.replace(/[\\/:*?"<>|]/g, '').slice(0, 80)
-      const file = new File([blob], `${safeName}.${picked.format}`, { type: picked.mime })
-      const author = gBook.authors?.[0]?.name?.replace(/,\s*/g, ' ').trim()
-
+      const downloaded = await downloadOnlineBook(item)
       addBook({
-        id: bookId,
-        name: gBook.title,
-        author,
-        format: picked.format,
-        size: blob.size,
-        file,
+        id: item.uid,
+        name: item.title,
+        author: downloaded.author || item.author,
+        format: downloaded.format,
+        size: downloaded.file.size,
+        file: downloaded.file,
         addedAt: Date.now(),
         progress: 0,
         currentPage: 1,
         totalPages: 0,
-        coverUrl: gBook.formats['image/jpeg'],
+        coverUrl: downloaded.coverUrl || item.coverUrl,
       })
-
-      navigate(`/read/${bookId}`)
+      navigate(`/read/${item.uid}`)
     } catch (err) {
       setError(
         err instanceof Error
-          ? `Failed to download "${gBook.title}": ${err.message}`
-          : `Failed to download "${gBook.title}".`
+          ? `Could not open "${item.title}": ${err.message}`
+          : `Could not open "${item.title}".`
       )
     } finally {
-      setDownloadingId(null)
+      setDownloadingUid(null)
     }
   }
 
   return (
     <div className="space-y-6 select-none">
-      {/* Banner & Search */}
+      {/* Separate API Source Tabs */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {API_SOURCES.map((api) => {
+          const active = source === api.id
+          return (
+            <button
+              key={api.id}
+              onClick={() => handleSourceSwitch(api.id)}
+              className={clsx(
+                'flex flex-col items-start text-left p-3.5 rounded-2xl border transition-all',
+                active
+                  ? 'bg-amber-600/20 border-amber-500 text-white shadow-lg shadow-amber-500/10'
+                  : 'bg-gray-900/70 border-gray-800 text-gray-400 hover:text-white hover:border-gray-700'
+              )}
+            >
+              <div className="flex items-center justify-between w-full mb-1.5">
+                <span className={clsx('p-1.5 rounded-lg', active ? 'bg-amber-500 text-gray-950' : 'bg-gray-800 text-amber-400')}>
+                  {api.icon}
+                </span>
+                <span
+                  className={clsx(
+                    'text-[10px] font-semibold px-2 py-0.5 rounded-full',
+                    active
+                      ? 'bg-amber-500/30 text-amber-200 border border-amber-400/40'
+                      : 'bg-gray-800 text-gray-400'
+                  )}
+                >
+                  {api.badge}
+                </span>
+              </div>
+              <span className="text-sm font-semibold text-white">{api.name}</span>
+              <span className="text-[11px] text-gray-400 line-clamp-1 mt-0.5">
+                {api.description}
+              </span>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Active API Banner & Search */}
       <div className="p-5 sm:p-6 rounded-3xl bg-gradient-to-br from-amber-950/35 via-gray-900 to-gray-950 border border-amber-500/20 shadow-xl">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-5">
           <div>
             <div className="flex items-center gap-2 text-amber-400 text-xs font-semibold uppercase tracking-wider mb-1">
-              <Globe className="w-4 h-4" /> Project Gutenberg · Gutendex
+              <Globe className="w-4 h-4" /> {activeSourceInfo.name} · {activeSourceInfo.badge}
             </div>
             <h2 className="text-xl sm:text-2xl font-serif font-bold text-white">
-              70,000+ Free Classic Books
+              Browse & Read Free Online Books
             </h2>
             <p className="text-xs sm:text-sm text-gray-400 mt-1">
-              Search any title or author and open it directly in the Apple Books viewer — saved offline automatically.
+              {activeSourceInfo.description}. Tap any book to download into your bookshelf and open immediately.
             </p>
           </div>
 
@@ -214,7 +238,7 @@ export default function OnlineLibrary() {
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search title or author (e.g. Sherlock)…"
+                placeholder={`Search ${activeSourceInfo.name}…`}
                 className="w-full bg-gray-950/80 border border-gray-700/80 rounded-xl pl-9 pr-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-amber-500"
               />
             </div>
@@ -248,13 +272,13 @@ export default function OnlineLibrary() {
 
       {/* Error */}
       {error && (
-        <div className="p-4 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex items-center justify-between gap-3">
+        <div className="p-4 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-300 text-sm flex flex-wrap items-center justify-between gap-3">
           <span>{error}</span>
           <button
-            onClick={() => void fetchCatalog()}
-            className="px-3 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-xs font-medium"
+            onClick={() => setReloadNonce((n) => n + 1)}
+            className="px-3 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-xs font-medium flex items-center gap-1.5"
           >
-            Retry
+            <RefreshCw className="w-3.5 h-3.5" /> Retry
           </button>
         </div>
       )}
@@ -263,42 +287,41 @@ export default function OnlineLibrary() {
       {loading ? (
         <div className="flex flex-col items-center justify-center py-20 gap-3 text-amber-400">
           <Loader2 className="w-8 h-8 animate-spin" />
-          <p className="text-sm text-gray-400">Browsing Project Gutenberg library…</p>
+          <p className="text-sm text-gray-400">Loading {activeSourceInfo.name}…</p>
         </div>
-      ) : results.length === 0 ? (
+      ) : results.length === 0 && !error ? (
         <div className="text-center py-16 text-gray-400">
           <Sparkles className="w-10 h-10 mx-auto mb-3 text-amber-500/40" />
           <p className="text-base font-medium text-white">No matching books found</p>
-          <p className="text-xs text-gray-500 mt-1">Try another title, author, or genre.</p>
+          <p className="text-xs text-gray-500 mt-1">
+            Try another keyword, genre, or switch to another API tab above.
+          </p>
         </div>
-      ) : (
+      ) : results.length > 0 ? (
         <>
           <div className="flex items-center justify-between text-xs text-gray-400 px-1">
             <span>
-              Showing {results.length} of {totalCount.toLocaleString()} free books
+              Showing {results.length} of {totalCount.toLocaleString()} results in {activeSourceInfo.name}
             </span>
             <span>Page {page}</span>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-5 sm:gap-6">
-            {results.map((gBook) => {
-              const cover = gBook.formats['image/jpeg']
-              const author = gBook.authors?.[0]?.name || 'Unknown Author'
-              const picked = pickBestFormat(gBook.formats)
-              const isSaved = books.some((b) => b.id === `gutenberg-${gBook.id}`)
-              const isDownloading = downloadingId === gBook.id
+            {results.map((item) => {
+              const isSaved = books.some((b) => b.id === item.uid)
+              const isDownloading = downloadingUid === item.uid
 
               return (
                 <div
-                  key={gBook.id}
-                  onClick={() => !isDownloading && void handleOpenBook(gBook)}
+                  key={item.uid}
+                  onClick={() => !isDownloading && void handleOpenBook(item)}
                   className="group flex flex-col cursor-pointer"
                 >
                   <div className="relative aspect-[2/3] rounded-2xl overflow-hidden shadow-xl group-hover:shadow-2xl group-hover:shadow-amber-500/10 transition-all duration-300 group-hover:-translate-y-1.5 border border-white/10 bg-gradient-to-br from-stone-800 via-stone-900 to-black">
-                    {cover ? (
+                    {item.coverUrl ? (
                       <img
-                        src={cover}
-                        alt={gBook.title}
+                        src={item.coverUrl}
+                        alt={item.title}
                         loading="lazy"
                         className="w-full h-full object-cover"
                       />
@@ -306,7 +329,7 @@ export default function OnlineLibrary() {
                       <div className="w-full h-full flex flex-col items-center justify-center p-4 text-center">
                         <BookOpen className="w-10 h-10 text-amber-400/40 mb-2" />
                         <span className="text-xs font-serif text-white line-clamp-3">
-                          {gBook.title}
+                          {item.title}
                         </span>
                       </div>
                     )}
@@ -314,17 +337,18 @@ export default function OnlineLibrary() {
                     {/* Spine shadow overlay */}
                     <div className="absolute inset-y-0 left-0 w-3 bg-gradient-to-r from-black/50 via-black/20 to-transparent pointer-events-none" />
 
-                    {/* Format / Saved badge */}
+                    {/* Format & Saved badge */}
                     <div className="absolute top-2 left-2 flex items-center gap-1">
-                      {picked && (
-                        <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-black/75 text-amber-300 border border-amber-500/30 backdrop-blur-md">
-                          {picked.format}
-                        </span>
-                      )}
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded-full bg-black/75 text-amber-300 border border-amber-500/30 backdrop-blur-md">
+                        {item.formatHint}
+                      </span>
                     </div>
 
                     {isSaved && (
-                      <span className="absolute top-2 right-2 p-1 rounded-full bg-emerald-500 text-white shadow-md" title="Saved on device">
+                      <span
+                        className="absolute top-2 right-2 p-1 rounded-full bg-emerald-500 text-white shadow-md"
+                        title="Saved on device"
+                      >
                         <Check className="w-3 h-3" />
                       </span>
                     )}
@@ -344,12 +368,16 @@ export default function OnlineLibrary() {
                       ) : (
                         <>
                           <div className="px-3 py-1.5 rounded-xl bg-amber-600 text-white text-xs font-semibold flex items-center gap-1.5 shadow-lg">
-                            {isSaved ? <BookOpen className="w-3.5 h-3.5" /> : <Download className="w-3.5 h-3.5" />}
+                            {isSaved ? (
+                              <BookOpen className="w-3.5 h-3.5" />
+                            ) : (
+                              <Download className="w-3.5 h-3.5" />
+                            )}
                             <span>{isSaved ? 'Read Now' : 'Open Book'}</span>
                           </div>
-                          <span className="text-[10px] text-gray-300">
-                            {gBook.download_count.toLocaleString()} reads
-                          </span>
+                          {item.subtitle && (
+                            <span className="text-[10px] text-gray-300">{item.subtitle}</span>
+                          )}
                         </>
                       )}
                     </div>
@@ -357,9 +385,9 @@ export default function OnlineLibrary() {
 
                   <div className="pt-2.5 px-1">
                     <h4 className="text-white text-sm font-medium leading-snug line-clamp-1 group-hover:text-amber-400 transition-colors">
-                      {gBook.title}
+                      {item.title}
                     </h4>
-                    <p className="text-xs text-gray-400 truncate mt-0.5">{author}</p>
+                    <p className="text-xs text-gray-400 truncate mt-0.5">{item.author}</p>
                   </div>
                 </div>
               )
@@ -385,7 +413,7 @@ export default function OnlineLibrary() {
             </button>
           </div>
         </>
-      )}
+      ) : null}
     </div>
   )
 }

@@ -207,7 +207,7 @@ export default function Library() {
           <Globe className="w-4 h-4" />
           <span>Online Library</span>
           <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold hidden sm:inline">
-            70,000+ Free
+            4 Free APIs
           </span>
         </button>
       </div>
